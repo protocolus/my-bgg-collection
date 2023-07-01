@@ -1,111 +1,128 @@
+import os
+import time
 import requests
 from bs4 import BeautifulSoup
-from pathlib import Path
-import time
-import os
+
+api_url = 'https://www.boardgamegeek.com/xmlapi2'
+username = 'Hhoffman'
+output_dir = 'collection'
+html_dir = '.'
+collection_file = f'{output_dir}/collection.xml'
+download_files = False
+download_collection_file = False
 
 def sanitize(filename: str) -> str:
-    # Many characters are not allowed in Windows filenames
-    for character in ['<', '>', ':', '"', '/', '\\', '|', '?', '*']:
+    for character in ['<', '>', ':', '"', '/', '\\', '|', '?', '*', '!', '&', '-', "'", '–']:
         filename = filename.replace(character, '')
+    if len(filename) > 200:
+        filename = filename[:200]
     return filename
 
-def download_file(url, path):
-    if not os.path.exists(path):
-        print(f'Downloading {url}...')
-        response = requests.get(url, stream=True)
-        with open(path, 'wb') as out_file:
-            out_file.write(response.content)
-        print(f'File written to {path}')
-        time.sleep(10)
+os.makedirs(output_dir, exist_ok=True)
 
-bgg_url = 'https://boardgamegeek.com/xmlapi2'
-username = 'Hhoffman'
-collection_file = 'collection.xml'
-html_dir = '.'
-output_dir = 'collection'
-download_files = False
+# Get Collection XML
+if not os.path.isfile(collection_file) or download_collection_file:
+    print('Downloading collection...')
+    while True:
+        collection_response = requests.get(f'{api_url}/collection?username={username}&own=1')
+        if collection_response.status_code == 202:
+            time.sleep(10)
+        elif collection_response.status_code == 200:
+            break
+        else:
+            raise Exception(f"Error occurred: {collection_response.status_code}")
+    with open(collection_file, 'wb') as file:
+        file.write(collection_response.content)
+        print(f'Collection file written to {collection_file}')
 
-# Create directories if they don't exist
-Path(html_dir).mkdir(parents=True, exist_ok=True)
-Path(output_dir).mkdir(parents=True, exist_ok=True)
+with open(collection_file, 'rb') as file:
+    collection_soup = BeautifulSoup(file, 'xml')
 
-if download_files:
-    collection_url = f'{bgg_url}/collection?username={username}&own=1'
-    download_file(collection_url, collection_file)
-    time.sleep(5)  # Delay to respect API guidelines
+# Extract item IDs
+items = [item['objectid'] for item in collection_soup.find_all('item')]
+print(f"Processing {len(items)} items...")
+remaining_items = len(items)
 
-# Parse the collection XML
-with open(collection_file, 'r', encoding='utf-8') as file:
-    collection_content = file.read()
-collection_soup = BeautifulSoup(collection_content, 'xml')
-items = collection_soup.find_all('item')
+# Lists to hold games for each player count
+games = [[] for _ in range(10)]
 
-# Prepare list to store games per player count
-games = [[] for _ in range(10)]  # Games for 1 to 10 players
-
-# Go through all items in the collection
-total_items = len(items)
-for i, item in enumerate(items, start=1):
-    item_id = item['objectid']
+# Get images and details for each item
+for item_id in items:
+    remaining_items -= 1
+    print(f"Remaining items: {remaining_items}")
     thing_file = f'{output_dir}/thing_{item_id}.xml'
-    
-    if download_files:
-        # Get thing XML
-        thing_url = f'{bgg_url}/thing?id={item_id}'
-        download_file(thing_url, thing_file)
-    
-    # Parse thing XML
-    with open(thing_file, 'r', encoding='utf-8') as file:
-        thing_content = file.read()
-    thing_soup = BeautifulSoup(thing_content, 'xml')
-    thumbnail_url = thing_soup.find('thumbnail').text
+    if not os.path.isfile(thing_file) or download_files:
+        print('Downloading thing details...')
+        while True:
+            thing_response = requests.get(f'{api_url}/thing?id={item_id}')
+            if thing_response.status_code == 202:
+                time.sleep(10)
+            elif thing_response.status_code == 200:
+                break
+            else:
+                raise Exception(f"Error occurred: {thing_response.status_code}")
+        with open(thing_file, 'wb') as file:
+            file.write(thing_response.content)
+            print(f'Thing file written to {thing_file}')
+    with open(thing_file, 'rb') as file:
+        thing_soup = BeautifulSoup(file, 'xml')
     image_url = thing_soup.find('image').text
-    title = sanitize(thing_soup.find('name')['value'])
-    thumbnail_file = f'{output_dir}/{title}_thumbnail.jpg'
-    image_file = f'{output_dir}/{title}_image.jpg'
-    
-    # Download image and thumbnail
-    download_file(thumbnail_url, thumbnail_file)
-    download_file(image_url, image_file)
-
-    # Find and adjust player count
+    thumbnail_url = thing_soup.find('thumbnail').text
+    title = sanitize(thing_soup.find('name', {'type': 'primary'})['value'])
     minplayers = int(thing_soup.find('minplayers')['value'])
     maxplayers = int(thing_soup.find('maxplayers')['value'])
+
+    # Make sure the player counts are in the expected range
     minplayers = max(minplayers, 1)
     maxplayers = min(maxplayers, 10)
 
-    # Store game info in relevant player count lists
-    for i in range(minplayers, maxplayers + 1):
+    yearpublished = thing_soup.find('yearpublished')['value']
+    description = thing_soup.find('description').text
+    image_file = f'{output_dir}/{title}_image.jpg'
+    thumbnail_file = f'{output_dir}/{title}_thumbnail.jpg'
+    if not os.path.isfile(image_file) or download_files:
+        print(f"Downloading image for {title}...")
+        image_response = requests.get(image_url)
+        with open(image_file, 'wb') as file:
+            file.write(image_response.content)
+            time.sleep(2)
+            print(f'Image file written to {image_file}')
+    if not os.path.isfile(thumbnail_file) or download_files:
+        print(f"Downloading thumbnail for {title}...")
+        thumbnail_response = requests.get(thumbnail_url)
+        with open(thumbnail_file, 'wb') as file:
+            file.write(thumbnail_response.content)
+            time.sleep(2)
+            print(f'Thumbnail file written to {thumbnail_file}')
+    for i in range(int(minplayers), int(maxplayers) + 1):
         games[i - 1].append((title, thumbnail_file, image_file))
+    with open(f'{html_dir}/{title}_details.html', 'w', encoding='utf-8') as details_file:
+        details_file.write(f'<html><head><title>{title}</title></head><body>')
+        details_file.write(f'<h1 style="text-align:center;">{title}</h1>')
+        details_file.write(f'<img src="{image_file}" style="display:block;margin-left:auto;margin-right:auto;width:50%;">')
+        details_file.write(f'<table><tr><td>Min Players</td><td>{minplayers}</td></tr>')
+        details_file.write(f'<tr><td>Max Players</td><td>{maxplayers}</td></tr>')
+        details_file.write(f'<tr><td>Year Published</td><td>{yearpublished}</td></tr>')
+        details_file.write(f'<tr><td>Description</td><td>{description}</td></tr></table>')
+        details_file.write('</body></html>')
+        print(f'Details file written to {title}_details.html')
 
-    print(f'Processed {title}. Remaining items: {total_items - i}')
-    
-# Create index HTML
-with open(f'{html_dir}/index.html', 'w', encoding='utf-8') as index_file:
-    index_file.write('<html><head><title>Collection</title></head><body>\n')
-    index_file.write('<div style="display: flex; flex-wrap: wrap; justify-content: space-around;">\n')
-    for game in sorted(games[0], key=lambda x: x[0]):  # Sorting games by title
-        title, thumbnail_file, image_file = game
-        index_file.write(f'<div><a href="{image_file}"><img src="{thumbnail_file}" alt="{title}" width="200"></a><p>{title}</p></div>\n')
-    index_file.write('</div></body></html>\n')
-    print(f'Index file written to index.html')
+print('All files have been downloaded. The collection is complete.')
 
-# Create player count HTMLs
+# Create HTML files for player counts
 for i, game_list in enumerate(games, start=1):
-    with open(f'{html_dir}/{i}.html', 'w', encoding='utf-8') as player_file:
-        player_file.write('<html><head><title>Collection for ' + str(i) + ' players</title></head><body>\n')
-        player_file.write('<div style="display: flex; flex-wrap: wrap; justify-content: space-around;">\n')
-        for game in sorted(game_list, key=lambda x: x[0]):  # Sorting games by title
-            title, thumbnail_file, image_file = game
-            player_file.write(f'<div><a href="{image_file}"><img src="{thumbnail_file}" alt="{title}" width="200"></a><p>{title}</p></div>\n')
-        player_file.write('</div></body></html>\n')
-        print(f'Player count file written to {i}.html')
+    with open(f'{html_dir}/{i}.html', 'w', encoding='utf-8') as html_file:
+        html_file.write('<html><head><title>Games for ' + str(i) + ' players</title></head><body>')
+        html_file.write('<div style="display:flex;flex-wrap:wrap;">')
+        for title, thumbnail_file, image_file in sorted(game_list, key=lambda x: x[0]):
+            html_file.write(f'<div style="width:200px;"><a href="{title}_details.html"><img src="{thumbnail_file}" alt="{title}"></a><p>{title}</p></div>')
+        html_file.write('</div></body></html>')
+        print(f'HTML file written for {i} players')
 
 # Create menu HTML
 with open(f'{html_dir}/menu.html', 'w', encoding='utf-8') as menu_file:
-    menu_file.write('<html><head><title>Menu</title></head><body>\n')
+    menu_file.write('<html><head><title>Menu</title></head><body>')
     for i in range(1, 11):
-        menu_file.write(f'<a href="{i}.html"><button>{i}</button></a>\n')
-    menu_file.write('</body></html>\n')
-    print(f'Menu file written to menu.html')
+        menu_file.write(f'<a href="{i}.html"><button style="width:100px;height:100px;">{i}</button></a>')
+    menu_file.write('</body></html>')
+    print('Menu HTML file written.')
